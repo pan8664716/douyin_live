@@ -6,9 +6,10 @@
 流程：
   1. 读取 sources.txt，逐条解析来源（直播间页 / 分类页 / 纯房间号）
   2. 每个来源按三级策略抓取直播间信息：
-       ① HTTP 接口（分类接口 / room enter，最快）
-       ② HTTP 页面 HTML 内嵌 RSC 数据（接口被风控时仍可用，每分类约 15 个置顶房间）
-       ③ 浏览器（browser_fetch.mjs，Patchright，最后兜底）
+       ① HTTP 接口（分类接口 / room enter，最快；出口 IP 干净时约 120 房间/分类）
+       ② 浏览器（browser_fetch.mjs，Patchright）：滚动加载 + 拦截站点签名请求，
+          接口被 HTTP 风控时通常仍能拿到约 200 房间/分类
+       ③ HTTP 页面 HTML 内嵌 RSC 数据（前两级都失败时兜底，每分类约 15 个置顶房间）
   3. 增量去重合并：
        - 本轮抓到的所有房间**插到列表最前面**（按来源顺序，房间号去重）
        - 旧列表中与"本轮抓到"重复的条目**删除**（让位给顶部的新条目）
@@ -381,36 +382,46 @@ def browser_fetch(kind, target):
 
 
 def fetch_source(kind, target, sess):
-    """按 ①接口 -> ②页面 -> ③浏览器 三级抓取
+    """分类: ①接口 -> ②浏览器(滚动) -> ③页面;   直播间: ①接口 -> ②页面 -> ③浏览器
     返回 (rooms, method, group_name)
     """
     group = category_group_name(target) if kind == 'category' else '抖音'
-    if kind == 'category':
-        try:
-            rooms = http_fetch_category(sess, target)
-            if rooms:
-                return rooms, '①接口', group
-            print(f'  [①接口] {target}: 空列表, 换页面解析')
-        except Exception as e:
-            print(f'  [①接口] {target}: {e}')
-    else:
-        try:
-            rooms = http_fetch_room(sess, target)
-            if rooms:
-                return rooms, '①接口', group
-            print(f'  [①接口] {target}: 未开播/空数据, 换页面解析')
-        except Exception as e:
-            print(f'  [①接口] {target}: {e}')
+    # ① 接口（最快，IP 干净时房间最多）
     try:
-        rooms, names = http_fetch_page(kind, target, sess)
-        if kind == 'category':
-            group = category_group_name(target, names)
+        rooms = http_fetch_category(sess, target) if kind == 'category' else http_fetch_room(sess, target)
         if rooms:
-            return rooms, '②页面', group
+            return rooms, '接口', group
+        print(f'  [接口] {target}: 空数据, 换下一级')
     except Exception as e:
-        print(f'  [②页面] {target}: {e}')
-    rooms = browser_fetch(kind, target)
-    return rooms, '③浏览器', group
+        print(f'  [接口] {target}: {e}')
+
+    if kind == 'category':
+        # ② 浏览器滚动加载：站点自身签约请求通常能绕过 HTTP 接口的 IP 风控
+        try:
+            rooms = browser_fetch(kind, target)
+            if rooms:
+                return rooms, '浏览器', group
+        except Exception as e:
+            print(f'  [浏览器] {target}: {e}')
+        # ③ 页面静态数据兜底
+        try:
+            rooms, names = http_fetch_page(kind, target, sess)
+            group = category_group_name(target, names)
+            if rooms:
+                return rooms, '页面', group
+        except Exception as e:
+            print(f'  [页面] {target}: {e}')
+        raise RuntimeError('接口/浏览器/页面 三级均失败')
+    else:
+        # 直播间：页面静态数据兜底后，最后再试浏览器
+        try:
+            rooms, _names = http_fetch_page(kind, target, sess)
+            if rooms:
+                return rooms, '页面', group
+        except Exception as e:
+            print(f'  [页面] {target}: {e}')
+        rooms = browser_fetch(kind, target)
+        return rooms, '浏览器', group
 
 
 def read_existing_m3u():
@@ -477,18 +488,21 @@ def main():
     seen_new = set()
     group_of = {}         # rid -> group-title
     failed = []
-    counts = {'①接口': 0, '②页面': 0, '③浏览器': 0}
+    counts = {'接口': 0, '浏览器': 0, '页面': 0}
     for kind, target in sources:
         try:
             if http_ok:
                 rooms, method, group = fetch_source(kind, target, sess)
             else:
-                rooms, names = http_fetch_page(kind, target, sess)
-                method = '②页面'
-                group = category_group_name(target, names) if kind == 'category' else '抖音'
-            if not rooms and method == '②页面':
-                rooms = browser_fetch(kind, target)
-                method = '③浏览器'
+                # ttwid 都拿不到时，跳过硬编码的接口层：分类先浏览器，直播间先页面
+                if kind == 'category':
+                    rooms = browser_fetch(kind, target)
+                    method = '浏览器'
+                    group = category_group_name(target)
+                else:
+                    rooms, _names = http_fetch_page(kind, target, sess)
+                    method = '页面'
+                    group = '抖音'
         except Exception as e:
             failed.append(target)
             print(f'  [全部失败] {target}: {e}')

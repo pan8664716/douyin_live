@@ -10,9 +10,10 @@
   - 本轮未抓到的历史条目按原顺序保留在后面
   - `group-title` 自动使用来源对应的**类目名**（英雄联盟/舞蹈/音乐…，从分类页动态提取）
 - 抓取策略（每来源三级自动降级）：
-  1. **HTTP 接口**（分类接口 / room enter，最快，约 120 房间/分类）
-  2. **HTTP 页面解析**（接口被风控时页面仍可用，从内嵌 RSC 数据取约 15 个置顶房间）
-  3. **浏览器**（Patchright + Chromium，页面内 webmssdk 自动签名，最后兜底）
+  1. **HTTP 接口**（分类接口 / room enter，最快；IP 干净时约 120 房间/分类）
+  2. **浏览器**（分类被接口风控时优先启用：Patchright 打开分类页**滚动加载**，
+     拦截站点自身带 a_bogus 签名的接口响应，实测单分类约 200 房间；直播间用页面内 room/web/enter）
+  3. **HTTP 页面解析**（前两级失败时的兜底，从内嵌 RSC 数据取约 15 个置顶房间）
 
 ## 文件说明
 
@@ -20,7 +21,7 @@
 |---|---|
 | `sources.txt` | **来源配置**：每行一个直播间页或分类页地址，改成你自己的即可 |
 | `update_m3u.py` | 主脚本：解析来源 → 三级抓取 → 本轮房间置顶 + 全局去重 + 类目名分组 |
-| `browser_fetch.mjs` | 浏览器兜底（Patchright），仅前两级都失败时被调用 |
+| `browser_fetch.mjs` | 浏览器抓取（Patchright）：分类页滚动加载并拦截签名接口响应，直播间页内调 enter |
 | `douyin_live.m3u` | 播放列表：本轮房间置顶、重复自动删除、类目名分组 |
 | `.github/workflows/update-m3u.yml` | 每 4 小时定时 + 手动触发的工作流 |
 
@@ -37,7 +38,7 @@ python3 update_m3u.py --dry-run
 python3 update_m3u.py
 ```
 
-> 本机有系统 Chrome 时浏览器兜底直接使用系统 Chrome；GitHub 运行器会自动安装 Patchright 自带 Chromium。
+> 本机有系统 Chrome 时浏览器直接使用系统 Chrome；GitHub 运行器会自动安装 Patchright 自带 Chromium。
 
 ## 部署到 GitHub
 
