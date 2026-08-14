@@ -1,0 +1,10 @@
+{
+  "name": "douyin-m3u8-updater",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "抖音直播 m3u 增量更新：纯 HTTP 优先，失败自动切换 Patchright 浏览器兜底",
+  "dependencies": {
+    "patchright": "^1.61.1"
+  }
+}

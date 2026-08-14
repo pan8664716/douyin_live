@@ -1,0 +1,27 @@
+# ============================================================
+# 来源配置：每行一个地址，以 # 开头的是注释
+#
+# 支持两类地址：
+#   1. 直播间页     https://live.douyin.com/745350622378
+#   2. 分类页       https://live.douyin.com/categorynew/4_105
+#                  或 https://live.douyin.com/categorynew/4_103_1_2_1_1010014
+#   也可以只写房间号：745350622378
+#
+# 把下面这些默认分类换成你自己的地址即可。
+# ============================================================
+
+# 游戏分类
+https://live.douyin.com/categorynew/4_103_1_2_1_1010014
+https://live.douyin.com/categorynew/4_103_1_2_1_1010045
+https://live.douyin.com/categorynew/4_103_1_2_1_1010055
+https://live.douyin.com/categorynew/4_103_1_2_1_1010350
+https://live.douyin.com/categorynew/4_103_1_1_1_1010032
+https://live.douyin.com/categorynew/4_103_1_1_1_1011032
+
+# 热门分类
+https://live.douyin.com/categorynew/4_105
+https://live.douyin.com/categorynew/4_106
+https://live.douyin.com/categorynew/4_107
+https://live.douyin.com/categorynew/4_108
+https://live.douyin.com/categorynew/4_102
+https://live.douyin.com/categorynew/4_104
