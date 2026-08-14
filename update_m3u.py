@@ -9,12 +9,15 @@
        ① HTTP 接口（分类接口 / room enter，最快）
        ② HTTP 页面 HTML 内嵌 RSC 数据（接口被风控时仍可用，每分类约 15 个置顶房间）
        ③ 浏览器（browser_fetch.mjs，Patchright，最后兜底）
-  3. 增量去重：读取现有 douyin_live.m3u 的房间号集合，
-     把"新出现"的房间插到文件最前面，已有条目保持不变
+  3. 增量去重合并：
+       - 本轮抓到的所有房间**插到列表最前面**（按来源顺序，房间号去重）
+       - 旧列表中与"本轮抓到"重复的条目**删除**（让位给顶部的新条目）
+       - 本轮未抓到的历史条目按原顺序保留在后面
+  4. group-title 使用来源对应的类目名（从分类页动态提取，如 英雄联盟/舞蹈/音乐）
 
 用法：
   python3 update_m3u.py             # 正常更新
-  python3 update_m3u.py --dry-run   # 只打印将要新增的内容，不写文件
+  python3 update_m3u.py --dry-run   # 只打印将要做的变更，不写文件
 """
 import http.cookiejar
 import json
@@ -38,6 +41,14 @@ MAX_PAGES = 8            # 每个分类最多拉 8 页(15/页 ≈ 120 房间)
 PAGE_SLEEP = 3.0         # 页面请求间隔，避免触发风控
 SOURCE_SLEEP = 2.0       # 来源之间的间隔
 BROWSER_TIMEOUT = 300    # 单个来源浏览器兜底超时(秒)
+
+# 已知分类的静态名称映射（sources.txt 默认 12 个地址；页面动态提取失败时兜底）
+CATEGORY_NAMES = {
+    '1010014': '英雄联盟', '1010045': '王者荣耀', '1010055': '金铲铲之战',
+    '1010350': '魔兽争霸3', '1010032': '和平精英', '1011032': '三角洲行动',
+    '105': '舞蹈', '106': '文化', '107': '生活', '108': '运动',
+    '102': '音乐', '104': '二次元',
+}
 
 
 class Session:
@@ -210,10 +221,69 @@ def http_fetch_room(sess, rid):
     return [{'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick}]
 
 
+def extract_category_names(blob):
+    """从 RSC 数据里的 categoryData 分类树提取 {(type, id): 类目名}
+    例如 4_103_1_2_1_1010014 -> (1,'1010014') => '英雄联盟'
+    """
+    i = blob.find('"categoryData":')
+    if i < 0:
+        return {}
+    j = blob.find('[', i)
+    if j < 0:
+        return {}
+    depth = 0
+    arr = None
+    for k in range(j, len(blob)):
+        c = blob[k]
+        if c == '[':
+            depth += 1
+        elif c == ']':
+            depth -= 1
+            if depth == 0:
+                try:
+                    arr = json.loads(blob[j:k + 1])
+                except Exception:
+                    arr = None
+                break
+    if not arr:
+        return {}
+    out = {}
+
+    def walk(nodes):
+        for n in nodes:
+            part = n.get('partition') or {}
+            tid = str(part.get('id_str') or '')
+            ty = part.get('type')
+            if tid:
+                out.setdefault((ty, tid), (part.get('title') or '').strip())
+            walk(n.get('sub_partition') or [])
+
+    walk(arr)
+    return out
+
+
+def category_group_name(path, names=None):
+    """分类路径 -> group-title 名称
+    优先用页面动态提取的类目名(取路径最深层)，其次静态映射，最后回退'抖音'
+    """
+    seg = [s for s in path.split('_') if s]
+    pairs = []
+    for a, b in zip(seg[::2], seg[1::2]):
+        pairs.append((int(a), b))
+    if not pairs:
+        return '抖音'
+    if names:
+        for ty, pid in reversed(pairs):
+            t = names.get((ty, pid))
+            if t:
+                return t
+    return CATEGORY_NAMES.get(pairs[-1][1], '抖音')
+
+
 def parse_page_html(html):
     """② 解析页面 HTML 内嵌的 RSC 数据（self.__pace_f.push 块）
     接口被风控时页面 GET 仍可用；分类页约 15 个置顶房间，直播间页单个
-    返回 [{'rid', 'title', 'avatar', 'nickname'}]
+    返回 (rooms, category_names)
     """
     parts = []
     for m in re.finditer(r'self\.__pace_f\.push\(\[1,"', html):
@@ -278,11 +348,14 @@ def parse_page_html(html):
             avatar = av
         rooms.append({'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick})
         seen.add(rid)
-    return rooms
+    names = extract_category_names(blob)
+    return rooms, names
 
 
 def http_fetch_page(kind, target, sess):
-    """② 纯 HTTP 拉页面并解析 RSC 数据"""
+    """② 纯 HTTP 拉页面并解析 RSC 数据
+    返回 (rooms, category_names)
+    """
     url = f'https://live.douyin.com/categorynew/{target}' if kind == 'category' \
         else f'https://live.douyin.com/{target}'
     referer = 'https://www.google.com/' if kind == 'room' else None
@@ -308,12 +381,15 @@ def browser_fetch(kind, target):
 
 
 def fetch_source(kind, target, sess):
-    """按 ①接口 -> ②页面 -> ③浏览器 三级抓取，返回 (rooms, used_method)"""
+    """按 ①接口 -> ②页面 -> ③浏览器 三级抓取
+    返回 (rooms, method, group_name)
+    """
+    group = category_group_name(target) if kind == 'category' else '抖音'
     if kind == 'category':
         try:
             rooms = http_fetch_category(sess, target)
             if rooms:
-                return rooms, '①接口'
+                return rooms, '①接口', group
             print(f'  [①接口] {target}: 空列表, 换页面解析')
         except Exception as e:
             print(f'  [①接口] {target}: {e}')
@@ -321,18 +397,20 @@ def fetch_source(kind, target, sess):
         try:
             rooms = http_fetch_room(sess, target)
             if rooms:
-                return rooms, '①接口'
+                return rooms, '①接口', group
             print(f'  [①接口] {target}: 未开播/空数据, 换页面解析')
         except Exception as e:
             print(f'  [①接口] {target}: {e}')
     try:
-        rooms = http_fetch_page(kind, target, sess)
+        rooms, names = http_fetch_page(kind, target, sess)
+        if kind == 'category':
+            group = category_group_name(target, names)
         if rooms:
-            return rooms, '②页面'
+            return rooms, '②页面', group
     except Exception as e:
         print(f'  [②页面] {target}: {e}')
     rooms = browser_fetch(kind, target)
-    return rooms, '③浏览器'
+    return rooms, '③浏览器', group
 
 
 def read_existing_m3u():
@@ -370,12 +448,12 @@ def clean_text(s):
     return re.sub(r'["\r\n]', '', s or '').replace(',', '，').strip()
 
 
-def render_entry(room, group_name=''):
+def render_entry(room, group_name='抖音'):
     t = clean_text(room['title']) or clean_text(room['nickname']) or room['rid']
     logo = room.get('avatar') or ''
     if not logo.startswith('http'):
         logo = ''
-    g = clean_text(group_name) if group_name else '抖音'
+    g = clean_text(group_name) or '抖音'
     return (f'#EXTINF:-1 tvg-logo="{logo}" group-title="{g}", {t}',
             f'https://douyin-m3u8.pages.dev/room/{room["rid"]}')
 
@@ -395,14 +473,19 @@ def main():
         http_ok = False
         print(f'⚠ ttwid 初始化失败({e})，跳过 ①接口 层级')
 
-    new_rooms = []        # 本轮新发现的房间（去重）
+    new_rooms = []        # 本轮抓到的所有房间（按来源顺序，房间号去重）
     seen_new = set()
+    group_of = {}         # rid -> group-title
     failed = []
     counts = {'①接口': 0, '②页面': 0, '③浏览器': 0}
     for kind, target in sources:
         try:
-            rooms, method = fetch_source(kind, target, sess) if http_ok \
-                else (http_fetch_page(kind, target, sess), '②页面')
+            if http_ok:
+                rooms, method, group = fetch_source(kind, target, sess)
+            else:
+                rooms, names = http_fetch_page(kind, target, sess)
+                method = '②页面'
+                group = category_group_name(target, names) if kind == 'category' else '抖音'
             if not rooms and method == '②页面':
                 rooms = browser_fetch(kind, target)
                 method = '③浏览器'
@@ -411,46 +494,55 @@ def main():
             print(f'  [全部失败] {target}: {e}')
             continue
         counts[method] += 1
-        print(f'  [{method}] {target}: {len(rooms)} 个')
+        print(f'  [{method}] {target}: {len(rooms)} 个, group="{group}"')
         for r in rooms:
             if r['rid'] not in seen_new:
                 seen_new.add(r['rid'])
                 new_rooms.append(r)
+                group_of[r['rid']] = group
         time.sleep(SOURCE_SLEEP)
 
     header, old_entries, old_seen = read_existing_m3u()
-    added = [r for r in new_rooms if r['rid'] not in old_seen]
+    top_rids = {r['rid'] for r in new_rooms}
+    added = [r for r in new_rooms if r['rid'] not in old_seen]      # 真正新增
+    refreshed = [r for r in new_rooms if r['rid'] in old_seen]      # 已存在、本次置顶刷新
+    removed = [e for e in old_entries if e[0] in top_rids]          # 被删除的旧重复条目
+    kept = [e for e in old_entries if e[0] not in top_rids]         # 本轮未抓到、保留
 
     print(f'\n抓取统计: {counts}，失败来源: {len(failed)} 个')
 
     if dry_run:
-        print(f'[DRY-RUN] 将新增 {len(added)} 个房间：')
+        print(f'[DRY-RUN] 新增 {len(added)} 条、置顶刷新 {len(refreshed)} 条、'
+              f'删除旧重复 {len(removed)} 条、保留历史 {len(kept)} 条')
         for r in added[:30]:
             t = clean_text(r['title']) or clean_text(r['nickname']) or r['rid']
-            print(f'  {r["rid"]}  {t[:40]}')
+            print(f'  + {r["rid"]}  [{group_of[r["rid"]]}] {t[:36]}')
         if len(added) > 30:
-            print(f'  ... 等共 {len(added)} 个')
+            print(f'  ... 等共 {len(added)} 条')
         return 0
 
-    if not added:
-        print(f'没有新增房间（共 {len(old_entries)} 条已有，本轮发现 {len(new_rooms)} 个均已在列表）')
+    if not new_rooms:
+        print(f'没有抓到任何房间（保留现有 {len(old_entries)} 条不变）')
         return 0 if not failed else 1
 
     lines = []
-    # 新发现的房间放在列表最前面，原有条目顺序不变
-    for r in added:
-        extinf, url = render_entry(r)
+    # 本轮抓到的全部放最前面（已去重）
+    for r in new_rooms:
+        extinf, url = render_entry(r, group_of[r['rid']])
         lines.append(extinf)
         lines.append(url)
-    for _rid, extinf, url in old_entries:
+    # 未抓到的历史条目按原顺序保留
+    for _rid, extinf, url in kept:
         lines.append(extinf)
         lines.append(url)
     with open(M3U_PATH, 'w', encoding='utf-8') as f:
         f.write(header + '\n'.join(lines) + '\n')
 
-    print(f'完成: 新增 {len(added)} 个房间, 列表现有 {len(old_entries) + len(added)} 条')
+    print(f'完成: 新增 {len(added)} 条, 置顶刷新 {len(refreshed)} 条, '
+          f'删除旧重复 {len(removed)} 条, 保留历史 {len(kept)} 条, 合计 {len(lines) // 2} 条')
     for r in added[:10]:
-        print(f'  + {r["rid"]}  {(clean_text(r["title"]) or clean_text(r["nickname"]))[:40]}')
+        t = clean_text(r['title']) or clean_text(r['nickname']) or r['rid']
+        print(f'  + {r["rid"]}  [{group_of[r["rid"]]}] {t[:36]}')
     if len(added) > 10:
         print(f'  ... 其余 {len(added) - 10} 条略')
     return 0 if not failed else 1
