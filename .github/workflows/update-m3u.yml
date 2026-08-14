@@ -39,7 +39,8 @@ jobs:
       - name: 安装浏览器兜底依赖（Patchright + Chromium）
         run: |
           npm ci
-          npx patchright install --with-deps chromium
+          npx patchright install chromium
+          npx patchright install-deps chromium
 
       - name: 增量更新 m3u（HTTP 优先，失败自动切浏览器）
         run: python3 update_m3u.py
