@@ -10,7 +10,7 @@
        ② HTTP 页面 HTML 内嵌 RSC 数据（接口被风控时仍可用，每分类约 15 个置顶房间）
        ③ 浏览器（browser_fetch.mjs，Patchright，最后兜底）
   3. 增量去重：读取现有 douyin_live.m3u 的房间号集合，
-     把"新出现"的房间追加到文件末尾，已有条目保持不变
+     把"新出现"的房间插到文件最前面，已有条目保持不变
 
 用法：
   python3 update_m3u.py             # 正常更新
@@ -437,11 +437,12 @@ def main():
         return 0 if not failed else 1
 
     lines = []
-    for _rid, extinf, url in old_entries:
-        lines.append(extinf)
-        lines.append(url)
+    # 新发现的房间放在列表最前面，原有条目顺序不变
     for r in added:
         extinf, url = render_entry(r)
+        lines.append(extinf)
+        lines.append(url)
+    for _rid, extinf, url in old_entries:
         lines.append(extinf)
         lines.append(url)
     with open(M3U_PATH, 'w', encoding='utf-8') as f:
