@@ -27,9 +27,11 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 M3U_PATH = os.path.join(BASE_DIR, 'douyin_live.m3u')
@@ -47,6 +49,7 @@ BROWSER_TIMEOUT = 300    # 单个来源浏览器兜底超时(秒)
 # 分类接口 URL 必须带 a_bogus 参数才会放行；服务端只校验参数存在，
 # 值可复用/伪造（实测 188 位固定值 60/60 全通过，任意分类与分页通用）
 A_BOGUS_PARAM = 'a' * 188
+MAX_WORKERS = 4          # 来源级并发线程数（减少总耗时，实测无风控）
 
 # 已知分类的静态名称映射（sources.txt 默认 12 个地址；页面动态提取失败时兜底）
 CATEGORY_NAMES = {
@@ -396,15 +399,20 @@ def http_fetch_page(kind, target, sess):
     return parse_page_html(body.decode('utf-8', 'ignore'))
 
 
+_browser_lock = threading.Lock()
+
+
 def browser_fetch(kind, target):
     """③ 浏览器兜底：调用 browser_fetch.mjs（Patchright）
     返回 [{'rid', 'title', 'avatar', 'nickname'}]
     """
     url = (f'https://live.douyin.com/categorynew/{target}' if kind == 'category'
            else f'https://live.douyin.com/{target}')
-    r = subprocess.run(
-        ['node', BROWSER_SCRIPT, url],
-        capture_output=True, text=True, timeout=BROWSER_TIMEOUT)
+    # 多线程并发时浏览器实例串行，避免多个 Chromium 抢资源
+    with _browser_lock:
+        r = subprocess.run(
+            ['node', BROWSER_SCRIPT, url],
+            capture_output=True, text=True, timeout=BROWSER_TIMEOUT)
     if r.returncode != 0:
         raise RuntimeError('浏览器兜底失败: ' + (r.stderr.strip() or r.stdout.strip())[-300:])
     rooms = json.loads(r.stdout)
@@ -504,6 +512,29 @@ def render_entry(room, group_name='抖音'):
             url)
 
 
+def _fetch_one(args):
+    """单个来源抓取任务（线程池 worker 用）
+    返回 (kind, target, rooms|None, method, group|None, err|None)
+    """
+    kind, target, sess, http_ok = args
+    try:
+        if http_ok:
+            rooms, method, group = fetch_source(kind, target, sess)
+        else:
+            # ttwid 都拿不到时，跳过硬编码的接口层：分类先浏览器，直播间先页面
+            if kind == 'category':
+                rooms = browser_fetch(kind, target)
+                method = '浏览器'
+                group = category_group_name(target)
+            else:
+                rooms, _names = http_fetch_page(kind, target, sess)
+                method = '页面'
+                group = '抖音'
+        return kind, target, rooms, method, group, None
+    except Exception as e:
+        return kind, target, None, None, None, str(e)
+
+
 def main():
     dry_run = '--dry-run' in sys.argv
     sources = load_sources()
@@ -519,28 +550,29 @@ def main():
         http_ok = False
         print(f'⚠ ttwid 初始化失败({e})，跳过 ①接口 层级')
 
+    # 来源级并发：每个 worker 用独立 Session（复制 master 的 ttwid cookie），
+    # 避免共享 CookieJar 的线程竞争；取回结果后仍按 sources 顺序合并
+    tasks = []
+    for kind, target in sources:
+        shard = Session()
+        for c in sess.cj:
+            shard.cj.set_cookie(c)
+        tasks.append((kind, target, shard, http_ok))
+
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        for r in ex.map(_fetch_one, tasks):
+            results.append(r)
+
     new_rooms = []        # 本轮抓到的所有房间（按来源顺序，房间号去重）
     seen_new = set()
     group_of = {}         # rid -> group-title
     failed = []
     counts = {'接口': 0, '浏览器': 0, '页面': 0}
-    for kind, target in sources:
-        try:
-            if http_ok:
-                rooms, method, group = fetch_source(kind, target, sess)
-            else:
-                # ttwid 都拿不到时，跳过硬编码的接口层：分类先浏览器，直播间先页面
-                if kind == 'category':
-                    rooms = browser_fetch(kind, target)
-                    method = '浏览器'
-                    group = category_group_name(target)
-                else:
-                    rooms, _names = http_fetch_page(kind, target, sess)
-                    method = '页面'
-                    group = '抖音'
-        except Exception as e:
+    for kind, target, rooms, method, group, err in results:
+        if err is not None or not rooms:
             failed.append(target)
-            print(f'  [全部失败] {target}: {e}')
+            print(f'  [全部失败] {target}: {err or "空数据"}')
             continue
         counts[method] += 1
         print(f'  [{method}] {target}: {len(rooms)} 个, group="{group}"')
@@ -549,7 +581,6 @@ def main():
                 seen_new.add(r['rid'])
                 new_rooms.append(r)
                 group_of[r['rid']] = group
-        time.sleep(SOURCE_SLEEP)
 
     header, old_entries, old_seen = read_existing_m3u()
     top_rids = {r['rid'] for r in new_rooms}
