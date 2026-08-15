@@ -187,13 +187,16 @@ def parse_category_item(it):
     title = (room.get('title') or '').strip()
     nick = (owner.get('nickname') or owner.get('nick_name') or '').strip()
     avatar = ''
-    av = it.get('avatar') or owner.get('avatar_thumb') or owner.get('avatar') or {}
-    if isinstance(av, dict):
-        ul = av.get('url_list') or []
-        if ul:
-            avatar = str(ul[0])
-    elif isinstance(av, str):
-        avatar = av
+    # 该分类接口变体没有 owner，头像在 room.cover.url_list；逐候选取值
+    for av in (it.get('avatar'), owner.get('avatar_thumb'), owner.get('avatar'), room.get('cover')):
+        if isinstance(av, dict):
+            ul = av.get('url_list') or []
+            if ul:
+                avatar = str(ul[0])
+                break
+        elif isinstance(av, str) and av:
+            avatar = av
+            break
     return {'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick,
             'url': extract_cdn_url(room)}
 
