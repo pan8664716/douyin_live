@@ -50,6 +50,23 @@ try {
   });
 }
 
+const CDN_QUALITY = ['FULL_HD1', 'HD1', 'SD1', 'SD2'];
+
+// 从 stream_url 提取最高清 CDN 直链（hls m3u8 优先，其次 flv；转 https）
+function extractCdnUrl(room) {
+  const su = (room && room.stream_url) || {};
+  const hls = su.hls_pull_url_map || {};
+  const flv = su.flv_pull_url || {};
+  for (const q of CDN_QUALITY) {
+    if (hls[q]) return String(hls[q]).replace('http://', 'https://');
+  }
+  for (const q of CDN_QUALITY) {
+    if (flv[q]) return String(flv[q]).replace('http://', 'https://');
+  }
+  if (su.hls_pull_url) return String(su.hls_pull_url).replace('http://', 'https://');
+  return '';
+}
+
 function parseApiItem(it) {
   const roomItem = it.room || {};
   const owner = it.owner || {};
@@ -68,7 +85,7 @@ function parseApiItem(it) {
       break;
     }
   }
-  return { rid, title, avatar, nickname };
+  return { rid, title, avatar, nickname, url: extractCdnUrl(roomItem) };
 }
 
 async function fetchCategory(page, path) {
@@ -125,7 +142,7 @@ async function fetchCategory(page, path) {
       [...new Set([...document.querySelectorAll('a[href*="live.douyin.com/"]')]
         .map((a) => (a.href.match(/live\.douyin\.com\/(\d{6,15})/) || [])[1])
         .filter(Boolean))]
-        .map((rid) => ({ rid, title: '', avatar: '', nickname: '' })));
+        .map((rid) => ({ rid, title: '', avatar: '', nickname: '', url: '' })));
   }
   return rooms;
 }
@@ -181,6 +198,7 @@ async function fetchRoom(page, rid) {
       title: d.title || '',
       avatar,
       nickname: user.nickname || user.nick_name || '',
+      url: extractCdnUrl(d),
     }];
   }, rid);
   return rooms;

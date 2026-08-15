@@ -145,6 +145,28 @@ def check_risk(headers, body, where):
         raise RuntimeError(f'触发风控({headers.get("bdturing-verify", "empty body")}) @ {where}')
 
 
+CDN_QUALITY = ['FULL_HD1', 'HD1', 'SD1', 'SD2']
+
+
+def extract_cdn_url(room):
+    """从分类/enter 响应里的 stream_url 提取最高清 CDN 直链
+    优先 hls_pull_url_map（m3u8），其次 flv_pull_url；转 https
+    """
+    su = (room or {}).get('stream_url') or {}
+    hls = su.get('hls_pull_url_map') or {}
+    flv = su.get('flv_pull_url') or {}
+    for q in CDN_QUALITY:
+        u = hls.get(q) or ''
+        if u:
+            return u.replace('http://', 'https://')
+    for q in CDN_QUALITY:
+        u = flv.get(q) or ''
+        if u:
+            return u.replace('http://', 'https://')
+    u = su.get('hls_pull_url') or ''
+    return u.replace('http://', 'https://') or None
+
+
 def parse_category_item(it):
     """从分类接口单条记录取出 (rid, title, avatar, nickname)"""
     room = it.get('room') or {}
@@ -162,7 +184,8 @@ def parse_category_item(it):
             avatar = str(ul[0])
     elif isinstance(av, str):
         avatar = av
-    return {'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick}
+    return {'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick,
+            'url': extract_cdn_url(room)}
 
 
 def http_fetch_category(sess, path):
@@ -219,7 +242,8 @@ def http_fetch_room(sess, rid):
         ul = av.get('url_list') or []
         if ul:
             avatar = str(ul[0])
-    return [{'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick}]
+    return [{'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick,
+             'url': extract_cdn_url(d)}]
 
 
 def extract_category_names(blob):
@@ -347,7 +371,8 @@ def parse_page_html(html):
                 avatar = str(ul[0])
         elif isinstance(av, str):
             avatar = av
-        rooms.append({'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick})
+        rooms.append({'rid': rid, 'title': title, 'avatar': avatar, 'nickname': nick,
+                      'url': extract_cdn_url(rm)})
         seen.add(rid)
     names = extract_category_names(blob)
     return rooms, names
@@ -443,7 +468,9 @@ def read_existing_m3u():
             i += 1
             continue
         if l.startswith('#EXTINF') and i + 1 < len(lines) and lines[i + 1].startswith('http'):
-            m = re.search(r'/room/(\d+)', lines[i + 1])
+            m = re.search(r'tvg-id="(\d+)"', l)
+            if not m:
+                m = re.search(r'/room/(\d+)', lines[i + 1])
             if m:
                 rid = m.group(1)
                 if rid not in seen:
@@ -465,8 +492,9 @@ def render_entry(room, group_name='抖音'):
     if not logo.startswith('http'):
         logo = ''
     g = clean_text(group_name) or '抖音'
-    return (f'#EXTINF:-1 tvg-logo="{logo}" group-title="{g}", {t}',
-            f'https://douyin-m3u8.pages.dev/room/{room["rid"]}')
+    url = room.get('url') or f'https://douyin-m3u8.pages.dev/room/{room["rid"]}'
+    return (f'#EXTINF:-1 tvg-logo="{logo}" group-title="{g}" tvg-id="{room["rid"]}", {t}',
+            url)
 
 
 def main():
