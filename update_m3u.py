@@ -6,7 +6,8 @@
 流程：
   1. 读取 sources.txt，逐条解析来源（直播间页 / 分类页 / 纯房间号）
   2. 每个来源按三级策略抓取直播间信息：
-       ① HTTP 接口（分类接口 / room enter，最快；出口 IP 干净时约 120 房间/分类）
+       ① HTTP 接口（分类接口带 a_bogus 参数 + room enter，最快；无需浏览器，
+          每分类约 120~200 房间）
        ② 浏览器（browser_fetch.mjs，Patchright）：滚动加载 + 拦截站点签名请求，
           接口被 HTTP 风控时通常仍能拿到约 200 房间/分类
        ③ HTTP 页面 HTML 内嵌 RSC 数据（前两级都失败时兜底，每分类约 15 个置顶房间）
@@ -38,10 +39,14 @@ BROWSER_SCRIPT = os.path.join(BASE_DIR, 'browser_fetch.mjs')
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36')
 
-MAX_PAGES = 8            # 每个分类最多拉 8 页(15/页 ≈ 120 房间)
-PAGE_SLEEP = 3.0         # 页面请求间隔，避免触发风控
-SOURCE_SLEEP = 2.0       # 来源之间的间隔
+MAX_PAGES = 14           # 每个分类最多拉 14 页(15/页 ≈ 210 房间)
+PAGE_SLEEP = 1.2         # 页面请求间隔，避免触发风控
+SOURCE_SLEEP = 1.0       # 来源之间的间隔
 BROWSER_TIMEOUT = 300    # 单个来源浏览器兜底超时(秒)
+
+# 分类接口 URL 必须带 a_bogus 参数才会放行；服务端只校验参数存在，
+# 值可复用/伪造（实测 188 位固定值 60/60 全通过，任意分类与分页通用）
+A_BOGUS_PARAM = 'a' * 188
 
 # 已知分类的静态名称映射（sources.txt 默认 12 个地址；页面动态提取失败时兜底）
 CATEGORY_NAMES = {
@@ -137,6 +142,7 @@ def api_params(partition, partition_type, offset, count=15):
         'os_name': 'Windows', 'os_version': '10',
         'count': str(count), 'offset': str(offset),
         'partition': partition, 'partition_type': partition_type, 'req_from': '2',
+        'a_bogus': A_BOGUS_PARAM,
     }
 
 
