@@ -69,7 +69,7 @@ function extractCdnUrl(room) {
 
 function parseApiItem(it) {
   const roomItem = it.room || {};
-  const owner = it.owner || {};
+  const owner = roomItem.owner || it.owner || {};
   const rid = String(it.web_rid || roomItem.web_rid || roomItem.webRid || '').trim();
   if (!/^\d{6,15}$/.test(rid)) return null;
   const title = (roomItem.title || '').trim();
@@ -184,7 +184,7 @@ async function fetchRoom(page, rid) {
     catch { throw new Error('enter接口返回非JSON(status=' + res.status + '): ' + txt.slice(0, 120)); }
     const d = j?.data?.data?.[0];
     if (!d) return [];
-    const user = d.user || d.owner || {};
+    const user = d.owner || d.user || {};
     let avatar = '';
     const av = user.avatar_thumb || user.avatar || {};
     if (av && typeof av === 'object') {

@@ -183,7 +183,7 @@ def extract_cdn_url(room):
 def parse_category_item(it):
     """从分类接口单条记录取出 (rid, title, avatar, nickname)"""
     room = it.get('room') or {}
-    owner = it.get('owner') or {}
+    owner = room.get('owner') or it.get('owner') or {}
     rid = str(it.get('web_rid') or room.get('web_rid') or room.get('webRid') or '').strip()
     if not (rid.isdigit() and 6 <= len(rid) <= 15):
         return None
@@ -263,7 +263,7 @@ def http_fetch_room(sess, rid):
     if not d0 or not d0[0]:
         return []
     d = d0[0]
-    user = d.get('user') or d.get('owner') or {}
+    user = d.get('owner') or d.get('user') or {}
     title = (d.get('title') or '').strip()
     nick = (user.get('nickname') or user.get('nick_name') or '').strip()
     avatar = ''
@@ -522,7 +522,16 @@ def clean_text(s):
 
 
 def render_entry(room, group_name='抖音'):
-    t = clean_text(room['title']) or clean_text(room['nickname']) or room['rid']
+    nick = clean_text(room.get('nickname') or '')
+    title = clean_text(room.get('title') or '')
+    if nick and title:
+        t = f'{nick}-{title}'
+    elif nick:
+        t = nick
+    elif title:
+        t = title
+    else:
+        t = room['rid']
     logo = room.get('avatar') or ''
     if not logo.startswith('http'):
         logo = ''
