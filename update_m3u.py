@@ -50,6 +50,8 @@ BROWSER_TIMEOUT = 300    # 单个来源浏览器兜底超时(秒)
 # 值可复用/伪造（实测 188 位固定值 60/60 全通过，任意分类与分页通用）
 A_BOGUS_PARAM = 'a' * 188
 MAX_WORKERS = 4          # 来源级并发线程数（减少总耗时，实测无风控）
+CATEGORY_RETRY = 3       # 分类接口遇空/风控时整体重试次数（接口偶发抖动）
+RETRY_SLEEP = 2.0        # 重试间隔(秒)
 
 # 已知分类的静态名称映射（sources.txt 默认 12 个地址；页面动态提取失败时兜底）
 CATEGORY_NAMES = {
@@ -203,25 +205,39 @@ def parse_category_item(it):
 
 
 def http_fetch_category(sess, path):
-    """① 纯 HTTP 接口拉取分类页下的直播间列表"""
+    """① 纯 HTTP 接口拉取分类页下的直播间列表
+    接口对热门分类偶发返回空/风控（抖动），整体重试数次
+    """
     partition, ptype = split_category(path)
-    rooms = []
-    for page in range(MAX_PAGES):
-        offset = page * 15
-        url = ('https://live.douyin.com/webcast/web/partition/detail/room/v2/?'
-               + urllib.parse.urlencode(api_params(partition, ptype, offset)))
-        st, body, headers = sess.get(url, referer='https://live.douyin.com/categorynew/' + path)
-        check_risk(headers, body, f'分类接口 p{page}')
-        j = json.loads(body)
-        items = (j.get('data') or {}).get('data') or []
-        for it in items:
-            r = parse_category_item(it)
-            if r:
-                rooms.append(r)
-        if len(items) < 15:
-            break
-        time.sleep(PAGE_SLEEP)
-    return rooms
+    last_err = None
+    for attempt in range(CATEGORY_RETRY):
+        if attempt:
+            time.sleep(RETRY_SLEEP)
+        rooms = []
+        try:
+            for page in range(MAX_PAGES):
+                offset = page * 15
+                url = ('https://live.douyin.com/webcast/web/partition/detail/room/v2/?'
+                       + urllib.parse.urlencode(api_params(partition, ptype, offset)))
+                st, body, headers = sess.get(url, referer='https://live.douyin.com/categorynew/' + path)
+                check_risk(headers, body, f'分类接口 p{page}')
+                j = json.loads(body)
+                items = (j.get('data') or {}).get('data') or []
+                for it in items:
+                    r = parse_category_item(it)
+                    if r:
+                        rooms.append(r)
+                if len(items) < 15:
+                    break
+                time.sleep(PAGE_SLEEP)
+            if rooms:
+                return rooms
+            last_err = '空数据'
+            print(f'  [接口] {path}: 第{attempt + 1}次尝试为空, 重试')
+        except Exception as e:
+            last_err = str(e)
+            print(f'  [接口] {path}: 第{attempt + 1}次尝试失败({str(e)[:60]}), 重试')
+    raise RuntimeError(f'分类接口重试{CATEGORY_RETRY}次仍失败: {last_err}')
 
 
 def http_fetch_room(sess, rid):
@@ -629,7 +645,9 @@ def main():
         print(f'  + {r["rid"]}  [{group_of[r["rid"]]}] {t[:36]}')
     if len(added) > 10:
         print(f'  ... 其余 {len(added) - 10} 条略')
-    return 0 if not failed else 1
+    # 部分来源失败（如分类接口临时抖动）不视为失败：m3u 已成功更新
+    # 仅当完全没有抓到任何房间（上面 not new_rooms 分支）才返回 1
+    return 0
 
 
 if __name__ == '__main__':
